@@ -26,6 +26,10 @@ import logging
 import re
 import urllib.parse
 from typing import Optional
+
+import requests
+from django.conf import settings
+
 from .base import BaseAgent, AgentResult
 
 logger = logging.getLogger("agents.url_agent")
@@ -137,6 +141,8 @@ class URLAnalysisAgent(BaseAgent):
                     "signal_count": 1,
                     "risk_label": "High Risk",
                     "signal_detail": {"dangerous_scheme": True},
+                    "online_check": {"checked": False, "reachable": None},
+                    "crosscheck_links": self._build_crosscheck_links(""),
                 },
             )
 
@@ -329,6 +335,25 @@ class URLAnalysisAgent(BaseAgent):
 
         risk_label = self._score_to_label(score)
 
+        # ------------------------------------------------------------------
+        # Online cross-check: quick reachability probe + manual-verification
+        # links, so users can independently confirm accuracy when a link
+        # looks wrong or the heuristic score seems off.
+        # ------------------------------------------------------------------
+        online_check = self._quick_online_check(url)
+        crosscheck_links = self._build_crosscheck_links(netloc_no_port)
+
+        if online_check.get("checked") and online_check.get("reachable") is False:
+            findings.append(
+                "The link could not be reached online — it may be broken, taken down, "
+                "or blocking automated checks."
+            )
+            suspicious_patterns.append("unreachable_online")
+            signal_detail["unreachable_online"] = True
+
+        final_url = online_check.get("final_url") or url
+        redirect_count = online_check.get("redirect_count", 0)
+
         return AgentResult(
             success=True,
             agent_name=self.agent_name,
@@ -344,14 +369,18 @@ class URLAnalysisAgent(BaseAgent):
                 "is_brand_impersonation_suspected": bool(impersonated_brand),
                 "is_typosquatting_suspected": is_typosquatting,
                 # New fields
-                "redirect_count": 0,      # Populated by redirect-following service (Phase 2)
-                "final_url": url,         # Same as input until redirect-following is added
+                "redirect_count": redirect_count,
+                "final_url": final_url,
                 "tld_risk": tld_risk_score,
                 "path_depth": path_depth,
                 "encoding_issues": encoding_issues,
                 "signal_count": len(suspicious_patterns),
                 "risk_label": risk_label,
                 "signal_detail": signal_detail,
+                # Online verification — lets the user quickly cross-check
+                # accuracy themselves instead of relying on heuristics alone.
+                "online_check": online_check,
+                "crosscheck_links": crosscheck_links,
             },
         )
 
@@ -440,6 +469,74 @@ class URLAnalysisAgent(BaseAgent):
         if has_https_signal:
             base += 5
         return min(95, base)
+
+    @staticmethod
+    def _build_crosscheck_links(domain: str) -> dict:
+        """
+        Build ready-to-click links to independent, well-known online tools so
+        a user can quickly cross-check whether a link/domain is accurate and
+        safe, rather than relying solely on our internal heuristics (which
+        can occasionally be wrong).
+        """
+        if not domain:
+            return {}
+        quoted_domain = urllib.parse.quote(domain, safe="")
+        return {
+            "google_safe_browsing": (
+                "https://transparencyreport.google.com/safe-browsing/search?url="
+                f"{quoted_domain}"
+            ),
+            "virustotal": f"https://www.virustotal.com/gui/domain/{quoted_domain}",
+            "urlscan": f"https://urlscan.io/search/#{quoted_domain}",
+            "whois": f"https://www.whois.com/whois/{quoted_domain}",
+        }
+
+    @staticmethod
+    def _quick_online_check(url: str) -> dict:
+        """
+        Perform a fast, best-effort reachability check against the live URL so
+        results reflect what's actually online right now (some links reported
+        as risky/safe by static heuristics alone may be outdated or wrong).
+
+        Designed to never slow down or break the pipeline:
+          - Disabled entirely via settings.URL_ONLINE_CHECK_ENABLED (tests run
+            with this off so CI stays fast and deterministic).
+          - Uses a short timeout (settings.URL_ONLINE_CHECK_TIMEOUT_SEC).
+          - Any network error is caught and reported, never raised.
+        """
+        if not getattr(settings, "URL_ONLINE_CHECK_ENABLED", True):
+            return {"checked": False, "reachable": None}
+
+        timeout = float(getattr(settings, "URL_ONLINE_CHECK_TIMEOUT_SEC", 3))
+
+        try:
+            resp = requests.head(
+                url, allow_redirects=True, timeout=timeout,
+                headers={"User-Agent": "TruthLensAI-URLCheck/1.0"},
+            )
+            # Some servers reject HEAD; fall back to a lightweight GET.
+            if resp.status_code in (403, 405):
+                resp = requests.get(
+                    url, allow_redirects=True, timeout=timeout, stream=True,
+                    headers={"User-Agent": "TruthLensAI-URLCheck/1.0"},
+                )
+            return {
+                "checked": True,
+                "reachable": resp.status_code < 400,
+                "status_code": resp.status_code,
+                "final_url": resp.url,
+                "redirect_count": len(resp.history),
+                "error": None,
+            }
+        except requests.RequestException as exc:
+            return {
+                "checked": True,
+                "reachable": False,
+                "status_code": None,
+                "final_url": url,
+                "redirect_count": 0,
+                "error": str(exc),
+            }
 
 
 # ---------------------------------------------------------------------------

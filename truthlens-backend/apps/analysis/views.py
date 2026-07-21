@@ -243,7 +243,10 @@ def _persist_analysis_results(analysis: Analysis, result: dict):
             encoding_issues=url_data.get("encoding_issues", False),
             signal_detail=url_data.get("signal_detail", {}),
             suspicious_patterns=url_data.get("suspicious_patterns", []),
-            reputation_signals={},
+            reputation_signals={
+                "online_check": url_data.get("online_check", {}),
+                "crosscheck_links": url_data.get("crosscheck_links", {}),
+            },
             url_risk_score=result["agent_scores"].get("url_analysis", 0),
             url_risk_details="\n".join(url_data.get("suspicious_patterns", [])),
         )

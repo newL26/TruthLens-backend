@@ -41,6 +41,8 @@ class RiskAssessmentAgent(BaseAgent):
         url_score: int = 0,
         scam_score: int = 0,
         community_score: int = 0,
+        source_score: int = 0,
+        evidence_score: int = 0,
         content_category: str = "unknown",
         scam_category: str = "none",
         content_findings: list = None,
@@ -53,32 +55,33 @@ class RiskAssessmentAgent(BaseAgent):
         scam_findings = scam_findings or []
 
         weights = getattr(settings, "RISK_SCORE_WEIGHTS", {
-            "content_analysis": 0.20,
-            "source_reliability": 0.20,
-            "evidence_verification": 0.25,
-            "url_risk": 0.15,
+            "content_analysis": 0.35,
+            "url_risk": 0.20,
+            "scam_pattern_detection": 0.35,
             "community_reports": 0.10,
-            "scam_pattern_detection": 0.10,
         })
 
-        # For Phase 1, source_reliability and evidence_verification use content_score
-        # as a proxy (no external evidence retrieval yet)
-        source_score = min(content_score + 10, 100)
-        evidence_score = content_score
+        total = int(min(100, (
+            content_score * weights.get("content_analysis", 0.35)
+            + url_score * weights.get("url_risk", 0.20)
+            + scam_score * weights.get("scam_pattern_detection", 0.35)
+            + community_score * weights.get("community_reports", 0.10)
+        )))
 
-        total = (
-            content_score * weights["content_analysis"]
-            + source_score * weights["source_reliability"]
-            + evidence_score * weights["evidence_verification"]
-            + url_score * weights["url_risk"]
-            + community_score * weights["community_reports"]
-            + scam_score * weights["scam_pattern_detection"]
-        )
-        total = int(min(100, total))
+        # Hard floors: a strong scam signal must never be suppressed to a safe verdict.
+        # Scam pattern detection is the most reliable Phase 1 signal — honour it.
+        if scam_score >= 85:
+            total = max(total, 78)   # at minimum "High Risk"
+        elif scam_score >= 70:
+            total = max(total, 63)   # at minimum "Suspicious"
+        elif scam_score >= 55:
+            total = max(total, 48)   # at minimum "Needs Verification"
+        elif scam_score >= 40:
+            total = max(total, 34)   # at minimum "Needs Verification"
 
-        # Boost if scam patterns are dominant
-        if scam_score >= 70 and scam_category != "none":
-            total = min(100, total + 10)
+        # Amplify when both content and scam agents independently flag the content
+        if content_score >= 40 and scam_score >= 40:
+            total = min(100, total + 8)
 
         risk_key, risk_label = self._get_risk_level(total)
         recommendation = RECOMMENDATIONS[risk_key]

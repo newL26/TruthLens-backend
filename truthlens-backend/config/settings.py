@@ -162,6 +162,11 @@ WATSONX_TIMEOUT_SEC = env.int("WATSONX_TIMEOUT_SEC", default=30)
 # 0.60 means AI contributes 60% of the final content score
 CONTENT_AI_WEIGHT = env.float("CONTENT_AI_WEIGHT", default=0.60)
 
+# URL online cross-check — quick, best-effort reachability probe run by
+# URLAnalysisAgent so results reflect the live link, not just static heuristics.
+URL_ONLINE_CHECK_ENABLED = env.bool("URL_ONLINE_CHECK_ENABLED", default=True)
+URL_ONLINE_CHECK_TIMEOUT_SEC = env.float("URL_ONLINE_CHECK_TIMEOUT_SEC", default=3.0)
+
 # Celery
 CELERY_BROKER_URL = env("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = env("REDIS_URL", default="redis://localhost:6379/0")

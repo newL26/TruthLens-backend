@@ -12,5 +12,7 @@ DATABASES = {
 
 # Use mock AI for all tests
 AI_PROVIDER = "mock"
+# Disable live network probing during tests — keep the suite fast/deterministic
+URL_ONLINE_CHECK_ENABLED = False
 # Silence logs during tests
 LOGGING["root"]["level"] = "WARNING"

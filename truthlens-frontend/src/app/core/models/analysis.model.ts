@@ -4,7 +4,7 @@ export interface User {
   id: string;
   email: string;
   full_name: string;
-  role: 'user' | 'analyst' | 'admin';
+  role: "user" | "analyst" | "admin";
   country: string;
   language: string;
   date_joined: string;
@@ -31,6 +31,22 @@ export interface ExtractedClaim {
   suspicion_reason: string;
 }
 
+export interface URLOnlineCheck {
+  checked: boolean;
+  reachable: boolean | null;
+  status_code?: number | null;
+  final_url?: string;
+  redirect_count?: number;
+  error?: string | null;
+}
+
+export interface URLCrosscheckLinks {
+  google_safe_browsing?: string;
+  virustotal?: string;
+  urlscan?: string;
+  whois?: string;
+}
+
 export interface URLAnalysisResult {
   url: string;
   domain: string;
@@ -47,7 +63,10 @@ export interface URLAnalysisResult {
   encoding_issues: boolean;
   signal_detail: Record<string, unknown>;
   suspicious_patterns: string[];
-  reputation_signals: Record<string, unknown>;
+  reputation_signals: {
+    online_check?: URLOnlineCheck;
+    crosscheck_links?: URLCrosscheckLinks;
+  } & Record<string, unknown>;
   url_risk_score: number | null;
   url_risk_details: string;
 }
@@ -85,7 +104,7 @@ export interface RiskAssessmentResult {
 
 export interface Evidence {
   id: string;
-  evidence_type: 'supporting' | 'contradicting' | 'neutral';
+  evidence_type: "supporting" | "contradicting" | "neutral";
   title: string;
   description: string;
   source_url: string;
@@ -96,22 +115,22 @@ export interface Evidence {
 
 export interface SubmittedContent {
   id: string;
-  content_type: 'text' | 'url' | 'image' | 'document';
+  content_type: "text" | "url" | "image" | "document";
   raw_text: string;
   url: string;
   created_at: string;
 }
 
 export type RiskLevel =
-  | 'trustworthy'
-  | 'mostly_trustworthy'
-  | 'needs_verification'
-  | 'suspicious'
-  | 'high_risk'
-  | 'scam'
-  | 'misinformation';
+  | "trustworthy"
+  | "mostly_trustworthy"
+  | "needs_verification"
+  | "suspicious"
+  | "high_risk"
+  | "scam"
+  | "misinformation";
 
-export type AnalysisStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type AnalysisStatus = "pending" | "processing" | "completed" | "failed";
 
 export interface Analysis {
   id: string;
