@@ -44,8 +44,15 @@ class AnalyzeView(APIView):
 
     Submit text and/or URL for AI-powered risk analysis.
     Returns a complete analysis result synchronously (Phase 1).
+
+    authentication_classes is intentionally empty: DRF's JWTAuthentication raises
+    401 when it encounters an expired/malformed Bearer token even on AllowAny views,
+    because authentication runs before permission checks. Removing the authenticator
+    from public views lets the request through regardless of any Authorization header
+    the client may (or may not) send.
     """
-    permission_classes = [permissions.AllowAny]  # Allow unauthenticated analysis in Phase 1
+    authentication_classes = []          # Skip JWT validation — public endpoint
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         serializer = AnalyzeTextRequestSerializer(data=request.data)
@@ -128,6 +135,7 @@ class URLInfoView(APIView):
     returns the full signal breakdown without storing anything to the DB.
     Useful for quick URL checks from the frontend without a full pipeline run.
     """
+    authentication_classes = []          # Skip JWT validation — public endpoint
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -170,6 +178,7 @@ class URLInfoView(APIView):
 class AnalysisDetailView(generics.RetrieveAPIView):
     """GET /api/v1/analysis/{id}/ — retrieve a specific analysis result"""
     serializer_class = AnalysisSerializer
+    authentication_classes = []          # Skip JWT validation — public endpoint (share links)
     permission_classes = [permissions.AllowAny]
     lookup_field = "id"
 

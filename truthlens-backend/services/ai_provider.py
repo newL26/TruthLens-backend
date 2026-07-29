@@ -6,26 +6,35 @@ Architecture
   BaseAIProvider          — abstract contract every provider must satisfy
     MockAIProvider        — deterministic synthetic responses (dev / CI)
     WatsonxProvider       — IBM watsonx.ai + IBM Granite (production)
+    OpenRouterProvider    — OpenRouter API (DeepSeek-v4-flash:free or any model)
 
 Factory
 -------
   get_ai_provider()  resolves the provider from settings at call-time.
 
   Resolution order:
-    1. settings.AI_PROVIDER == "watsonx"  AND  credentials present  → WatsonxProvider
-    2. settings.AI_PROVIDER == "watsonx"  AND  credentials missing   → MockAIProvider
-       (logged as WARNING so the operator knows)
-    3. anything else                                                  → MockAIProvider
+    1. settings.AI_PROVIDER == "openrouter"  AND  credentials present  → OpenRouterProvider
+    2. settings.AI_PROVIDER == "openrouter"  AND  key missing          → MockAIProvider (WARNING)
+    3. settings.AI_PROVIDER == "watsonx"     AND  credentials present  → WatsonxProvider
+    4. settings.AI_PROVIDER == "watsonx"     AND  credentials missing  → MockAIProvider (WARNING)
+    5. anything else                                                    → MockAIProvider
 
 Environment variables (all read via settings)
 ---------------------------------------------
-  AI_PROVIDER           = mock | watsonx          (default: mock)
-  WATSONX_API_KEY       = <IAM key>
-  WATSONX_URL           = https://us-south.ml.cloud.ibm.com
-  WATSONX_PROJECT_ID    = <project uuid>
-  WATSONX_MODEL_ID      = ibm/granite-13b-chat-v2 (default)
-  WATSONX_MAX_RETRIES   = 2                        (default)
-  WATSONX_TIMEOUT_SEC   = 30                       (default)
+  AI_PROVIDER              = mock | watsonx | openrouter   (default: mock)
+
+  # OpenRouter / DeepSeek
+  OPENROUTER_API_KEY       = <your key from openrouter.ai>
+  OPENROUTER_API_URL       = https://openrouter.ai/api/v1/chat/completions
+  OPENROUTER_MODEL         = deepseek/deepseek-v4-flash:free
+
+  # IBM watsonx.ai
+  WATSONX_API_KEY          = <IAM key>
+  WATSONX_URL              = https://us-south.ml.cloud.ibm.com
+  WATSONX_PROJECT_ID       = <project uuid>
+  WATSONX_MODEL_ID         = ibm/granite-13b-chat-v2 (default)
+  WATSONX_MAX_RETRIES      = 2                        (default)
+  WATSONX_TIMEOUT_SEC      = 30                       (default)
 
 Provider contract
 -----------------
@@ -42,6 +51,8 @@ import json
 import logging
 import re
 import time
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -120,27 +131,46 @@ class ProviderResponse:
 class ProviderConfig:
     """Resolved provider configuration from Django settings."""
     provider_name: str
+    # ── IBM watsonx ──
     api_key: str = ""
     url: str = ""
     project_id: str = ""
     model_id: str = "ibm/granite-13b-chat-v2"
     max_retries: int = 2
     timeout_sec: int = 30
+    # ── OpenRouter ──
+    openrouter_api_key: str = ""
+    openrouter_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    openrouter_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
     @classmethod
     def from_settings(cls) -> "ProviderConfig":
         return cls(
             provider_name=getattr(settings, "AI_PROVIDER", "mock"),
+            # watsonx
             api_key=getattr(settings, "WATSONX_API_KEY", ""),
             url=getattr(settings, "WATSONX_URL", "https://us-south.ml.cloud.ibm.com"),
             project_id=getattr(settings, "WATSONX_PROJECT_ID", ""),
             model_id=getattr(settings, "WATSONX_MODEL_ID", "ibm/granite-13b-chat-v2"),
             max_retries=int(getattr(settings, "WATSONX_MAX_RETRIES", 2)),
             timeout_sec=int(getattr(settings, "WATSONX_TIMEOUT_SEC", 30)),
+            # openrouter
+            openrouter_api_key=getattr(settings, "OPENROUTER_API_KEY", ""),
+            openrouter_api_url=getattr(
+                settings, "OPENROUTER_API_URL",
+                "https://openrouter.ai/api/v1/chat/completions"
+            ),
+            openrouter_model=getattr(
+                settings, "OPENROUTER_MODEL",
+                "deepseek/deepseek-v4-flash:free"
+            ),
         )
 
     def has_watsonx_credentials(self) -> bool:
         return bool(self.api_key and self.url and self.project_id)
+
+    def has_openrouter_credentials(self) -> bool:
+        return bool(self.openrouter_api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -151,10 +181,19 @@ def get_ai_provider(config: Optional[ProviderConfig] = None) -> "BaseAIProvider"
     """
     Return the appropriate AI provider.
 
-    Falls back to MockAIProvider with a WARNING log if:
-    - AI_PROVIDER=watsonx but credentials are incomplete.
+    Falls back to MockAIProvider with a WARNING log when required credentials
+    are absent.
     """
     cfg = config or ProviderConfig.from_settings()
+
+    if cfg.provider_name == "openrouter":
+        if cfg.has_openrouter_credentials():
+            return OpenRouterProvider(cfg)
+        logger.warning(
+            "AI_PROVIDER=openrouter but OPENROUTER_API_KEY is not set. "
+            "Falling back to MockAIProvider. Add OPENROUTER_API_KEY to .env."
+        )
+        return MockAIProvider(cfg)
 
     if cfg.provider_name == "watsonx":
         if cfg.has_watsonx_credentials():
@@ -163,6 +202,7 @@ def get_ai_provider(config: Optional[ProviderConfig] = None) -> "BaseAIProvider"
             "AI_PROVIDER=watsonx but WATSONX_API_KEY / WATSONX_PROJECT_ID are not set. "
             "Falling back to MockAIProvider. Set credentials in .env to use IBM watsonx.ai."
         )
+
     return MockAIProvider(cfg)
 
 
@@ -840,3 +880,255 @@ class WatsonxProvider(BaseAIProvider):
                 pass
 
         return None
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter provider — works with any OpenAI-compatible model via openrouter.ai
+# ---------------------------------------------------------------------------
+
+class OpenRouterProvider(BaseAIProvider):
+    """
+    OpenRouter provider using the OpenAI-compatible Chat Completions API.
+
+    Default model : deepseek/deepseek-v4-flash:free
+    (configurable via OPENROUTER_MODEL in .env)
+
+    Uses only stdlib (urllib) — no extra pip dependencies.
+    Falls back to MockAIProvider on any network/parse error.
+
+    Required setting
+    ----------------
+      OPENROUTER_API_KEY   — your key from https://openrouter.ai/keys
+
+    Optional
+      OPENROUTER_API_URL   — default: https://openrouter.ai/api/v1/chat/completions
+      OPENROUTER_MODEL     — default: deepseek/deepseek-v4-flash:free
+    """
+    provider_name = "openrouter"
+
+    def __init__(self, config: ProviderConfig):
+        super().__init__(config)
+        self._mock_fallback = MockAIProvider(config)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def analyze_content(self, text: str) -> ProviderResponse:
+        if not text or not text.strip():
+            return ProviderResponse(
+                success=False,
+                provider=self.provider_name,
+                model_id=self.config.openrouter_model,
+                error="Empty input",
+            )
+
+        system_msg = (
+            "You are TruthLens AI, a cybersecurity and misinformation detection system "
+            "helping users in Tanzania and East Africa stay safe online. "
+            "Respond ONLY with a single valid JSON object — no markdown, no explanation outside JSON."
+        )
+
+        user_msg = _ANALYSIS_PROMPT_TEMPLATE.format(text=text[:3000])
+
+        raw, tokens_in, tokens_out = self._chat(
+            system_msg=system_msg,
+            user_msg=user_msg,
+            max_tokens=700,
+        )
+
+        if not raw:
+            logger.warning("OpenRouter analyze_content returned empty — using mock fallback")
+            r = self._mock_fallback.analyze_content(text)
+            r.provider = f"{self.provider_name}(fallback:mock)"
+            return r
+
+        return self._parse_analysis(raw, tokens_in, tokens_out)
+
+    def generate_explanation(
+        self,
+        risk_score: int = 0,
+        risk_level: str = "needs_verification",
+        threat_category: str = "unknown",
+        findings: Optional[list] = None,
+        recommendation: str = "",
+    ) -> ProviderResponse:
+        findings = findings or []
+        findings_text = "\n".join(f"  - {f}" for f in findings[:6]) or "  - No specific findings."
+
+        system_msg = (
+            "You are TruthLens AI, a digital safety assistant helping non-technical users "
+            "in Tanzania and East Africa understand online risks. "
+            "Write clearly and simply. Do not use jargon."
+        )
+
+        user_msg = _EXPLANATION_PROMPT_TEMPLATE.format(
+            risk_score=risk_score,
+            risk_level=risk_level,
+            threat_category=threat_category,
+            findings_text=findings_text,
+            recommendation=recommendation,
+        )
+
+        raw, tokens_in, tokens_out = self._chat(
+            system_msg=system_msg,
+            user_msg=user_msg,
+            max_tokens=400,
+        )
+
+        if not raw:
+            return ProviderResponse(
+                success=False,
+                provider=self.provider_name,
+                model_id=self.config.openrouter_model,
+                error="Empty explanation response from OpenRouter",
+            )
+
+        return ProviderResponse(
+            success=True,
+            provider=self.provider_name,
+            model_id=self.config.openrouter_model,
+            explanation=raw.strip(),
+            prompt_tokens=tokens_in,
+            completion_tokens=tokens_out,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: HTTP call to OpenRouter
+    # ------------------------------------------------------------------
+
+    def _chat(
+        self,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int = 512,
+    ) -> tuple[str, int, int]:
+        """
+        Send a chat completion request to the OpenRouter API.
+
+        Returns (generated_text, prompt_tokens, completion_tokens).
+        Returns ("", 0, 0) on any error.
+
+        Uses only stdlib urllib — no httpx / requests required.
+        """
+        payload = json.dumps({
+            "model": self.config.openrouter_model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": user_msg},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.openrouter_api_key}",
+            "HTTP-Referer": "https://truthlens.ai",
+            "X-Title": "TruthLens AI",
+        }
+
+        req = urllib.request.Request(
+            url=self.config.openrouter_api_url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+
+        timeout = self.config.timeout_sec or 30
+        t0 = time.monotonic()
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+
+            latency = int((time.monotonic() - t0) * 1000)
+            logger.debug(
+                "OpenRouter response in %dms — model=%s",
+                latency,
+                self.config.openrouter_model,
+            )
+
+            choices = body.get("choices", [])
+            if not choices:
+                logger.warning("OpenRouter: empty choices list in response")
+                return "", 0, 0
+
+            text = choices[0].get("message", {}).get("content", "")
+            usage = body.get("usage", {})
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
+
+            return text.strip(), tokens_in, tokens_out
+
+        except urllib.error.HTTPError as exc:
+            # Read the error body for better diagnostics
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:
+                err_body = str(exc)
+            logger.error(
+                "OpenRouter HTTP %d error: %s", exc.code, err_body
+            )
+            return "", 0, 0
+
+        except urllib.error.URLError as exc:
+            logger.error("OpenRouter URL error: %s", exc.reason)
+            return "", 0, 0
+
+        except Exception as exc:
+            logger.error("OpenRouter unexpected error: %s", exc)
+            return "", 0, 0
+
+    # ------------------------------------------------------------------
+    # Internal: response parsing (shared with WatsonxProvider logic)
+    # ------------------------------------------------------------------
+
+    def _parse_analysis(
+        self, raw: str, tokens_in: int, tokens_out: int
+    ) -> ProviderResponse:
+        """Parse the JSON analysis response from DeepSeek/OpenRouter."""
+        parsed = WatsonxProvider._extract_json(raw)
+        if parsed is None:
+            logger.warning(
+                "OpenRouter: could not parse JSON from response (len=%d). "
+                "Using mock fallback scores.", len(raw)
+            )
+            return ProviderResponse(
+                success=False,
+                provider=self.provider_name,
+                model_id=self.config.openrouter_model,
+                error="JSON parse failed",
+                raw=raw[:500],
+                prompt_tokens=tokens_in,
+                completion_tokens=tokens_out,
+            )
+
+        risk_score = int(max(0, min(100, parsed.get("risk_score", 0))))
+        confidence = int(max(0, min(100, parsed.get("confidence", 60))))
+
+        claims_raw = parsed.get("claims", [])
+        claims = []
+        for c in claims_raw[:10]:
+            if isinstance(c, dict) and "text" in c:
+                claims.append({
+                    "text": str(c["text"])[:500],
+                    "requires_verification": bool(c.get("requires_verification", False)),
+                    "is_suspicious": risk_score > 50,
+                })
+
+        findings = [str(f)[:300] for f in parsed.get("findings", [])[:8] if f]
+
+        return ProviderResponse(
+            success=True,
+            provider=self.provider_name,
+            model_id=self.config.openrouter_model,
+            risk_score=risk_score,
+            category=str(parsed.get("category", "unknown")),
+            claims=claims,
+            findings=findings,
+            confidence=confidence,
+            prompt_tokens=tokens_in,
+            completion_tokens=tokens_out,
+            raw=raw[:500],
+        )

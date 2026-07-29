@@ -22,6 +22,7 @@ def _content_hash(text: str, url: str) -> str:
 
 class SubmitReportView(APIView):
     """POST /api/v1/community/report/ — submit a suspicious content report"""
+    authentication_classes = []          # Skip JWT validation — public endpoint
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -70,6 +71,7 @@ class SubmitReportView(APIView):
 class ThreatCampaignListView(generics.ListAPIView):
     """GET /api/v1/community/campaigns/ — list active threat campaigns"""
     serializer_class = ThreatCampaignSerializer
+    authentication_classes = []          # Skip JWT validation — public endpoint
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
@@ -81,6 +83,7 @@ class ThreatCampaignListView(generics.ListAPIView):
 class ThreatCampaignDetailView(generics.RetrieveAPIView):
     """GET /api/v1/community/campaigns/{id}/ — campaign detail"""
     serializer_class = ThreatCampaignSerializer
+    authentication_classes = []          # Skip JWT validation — public endpoint
     permission_classes = [permissions.AllowAny]
     lookup_field = "id"
     queryset = ThreatCampaign.objects.all()

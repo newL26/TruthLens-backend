@@ -147,8 +147,16 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"]
 ALLOWED_DOC_TYPES = ["application/pdf", "text/plain"]
 
-# AI Provider
+# AI Provider  (mock | watsonx | openrouter)
 AI_PROVIDER = env("AI_PROVIDER", default="mock")
+
+# OpenRouter / DeepSeek
+OPENROUTER_API_KEY = env("OPENROUTER_API_KEY", default="")
+OPENROUTER_API_URL = env(
+    "OPENROUTER_API_URL",
+    default="https://openrouter.ai/api/v1/chat/completions",
+)
+OPENROUTER_MODEL = env("OPENROUTER_MODEL", default="deepseek/deepseek-v4-flash:free")
 
 # watsonx.ai
 WATSONX_API_KEY = env("WATSONX_API_KEY", default="")

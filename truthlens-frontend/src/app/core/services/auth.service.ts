@@ -58,6 +58,11 @@ export class AuthService {
       );
   }
 
+  /** Called by JwtInterceptor when a refresh attempt fails — clears local state. */
+  forceLogout(): void {
+    this._clearTokens();
+  }
+
   refreshAccessToken(): Observable<{ access: string }> {
     const refresh = localStorage.getItem(REFRESH_KEY);
     return this.http
